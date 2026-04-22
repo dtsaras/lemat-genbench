@@ -134,7 +134,7 @@ uv run scripts/run_benchmarks.py --cifs cif_folder --config comprehensive_multi_
 
 ### 8. SUN (Stability, Uniqueness, Novelty)
 - **SUN Rate**: Fraction of structures that are simultaneously stable (e_above_hull ≤ 0), unique, and novel
-- **MetaSUN Rate**: Fraction of structures that are simultaneously metastable (e_above_hull ≤ 0.1), unique, and novel
+- **MetaSUN Rate**: Fraction of structures that are simultaneously metastable (0 < e_above_hull ≤ 0.1), unique, and novel
 - **Combined Rate**: Fraction of structures that are either stable or metastable, unique, and novel
 
 </details>
