@@ -1,0 +1,12 @@
+backend: hamgnn
+backend_kwargs: {}
+description: Electronic band-gap benchmark (pluggable backend)
+insulator_threshold: 3.0
+metal_threshold: 0.1
+n_jobs: 1
+preprocess: true
+target_max: null
+target_min: null
+timeout: null
+type: band_gap
+version: 0.1.0

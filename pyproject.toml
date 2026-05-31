@@ -38,6 +38,20 @@ dependencies = [
     "seaborn>=0.13.2",
 ]
 
+[project.optional-dependencies]
+# Pure-CPU ion migration-barrier metric (BVSE percolation via bvlain). Safe,
+# lightweight (numpy/scipy/pymatgen). Enables the `migration_barrier` benchmark.
+migration = ["bvlain"]
+# Convenience bundle of the in-env property extras.
+#
+# Band gap is configured separately by backend (it is intentionally NOT a pip
+# extra to keep `uv lock`/`uv sync` clean):
+#   * hamgnn — runs out-of-process in its own pinned env (see scripts/hamgnn/).
+#   * alignn — install `alignn` + `jarvis-tools` (+ a torch-matched `dgl` from
+#     https://www.dgl.ai, which is not on PyPI) manually; the backend imports
+#     them lazily.
+properties = ["bvlain"]
+
 [project.scripts]
 lemat-genbench = "lemat_genbench.cli:main"
 

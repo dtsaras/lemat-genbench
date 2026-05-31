@@ -11,6 +11,8 @@ from pathlib import Path
 import click
 import yaml
 
+# Property benchmarks (band gap, ion migration barrier, combined)
+from lemat_genbench.benchmarks.band_gap_benchmark import BandGapBenchmark
 from lemat_genbench.benchmarks.distribution_benchmark import (
     DistributionBenchmark,
 )
@@ -18,12 +20,16 @@ from lemat_genbench.benchmarks.diversity_benchmark import (
     DiversityBenchmark,
 )
 from lemat_genbench.benchmarks.hhi_benchmark import HHIBenchmark
+from lemat_genbench.benchmarks.migration_barrier_benchmark import (
+    MigrationBarrierBenchmark,
+)
 from lemat_genbench.benchmarks.multi_mlip_stability_benchmark import (
     StabilityBenchmark as MultiMLIPStabilityBenchmark,
 )
 
 # Use original benchmarks that are currently working
 from lemat_genbench.benchmarks.novelty_benchmark import NoveltyBenchmark
+from lemat_genbench.benchmarks.property_benchmark import PropertyBenchmark
 from lemat_genbench.benchmarks.sun_benchmark import SUNBenchmark
 from lemat_genbench.benchmarks.uniqueness_benchmark import UniquenessBenchmark
 from lemat_genbench.benchmarks.validity_benchmark import (
@@ -195,6 +201,62 @@ def load_benchmark_config(config_name: str) -> dict:
         }
         with open(config_path, "w") as f:
             yaml.dump(stability_config, f, default_flow_style=False)
+
+    # Add migration_barrier config creation (BVSE percolation barriers via bvlain)
+    if not config_path.exists() and config_path.name == "migration_barrier.yaml":
+        migration_config = {
+            "type": "migration_barrier",
+            "description": "Ion migration-barrier benchmark (BVSE percolation barriers via bvlain)",
+            "version": "0.1.0",
+            "mobile_ion": "Li1+",
+            "dimensionality": "3d",
+            "r_cut": 10.0,
+            "resolution": 0.2,
+            "k": 100,
+            "encut": 5.0,
+            "fast_threshold": 0.6,
+            "n_jobs": 1,
+            "timeout": 30,
+        }
+        with open(config_path, "w") as f:
+            yaml.dump(migration_config, f, default_flow_style=False)
+
+    # Add band_gap config creation (pluggable backend: hamgnn | alignn)
+    if not config_path.exists() and config_path.name == "band_gap.yaml":
+        band_gap_config = {
+            "type": "band_gap",
+            "description": "Electronic band-gap benchmark (pluggable backend)",
+            "version": "0.1.0",
+            "backend": "hamgnn",  # 'hamgnn' (accurate, needs OpenMX env) or 'alignn'
+            "backend_kwargs": {},
+            "preprocess": True,
+            "metal_threshold": 0.1,
+            "insulator_threshold": 3.0,
+            "target_min": None,
+            "target_max": None,
+            "n_jobs": 1,
+            "timeout": None,
+        }
+        with open(config_path, "w") as f:
+            yaml.dump(band_gap_config, f, default_flow_style=False)
+
+    # Add combined property config creation (band gap + migration barrier)
+    if not config_path.exists() and config_path.name == "property.yaml":
+        property_config = {
+            "type": "property",
+            "description": "Combined functional-property benchmark (band gap + migration barrier)",
+            "version": "0.1.0",
+            "include_band_gap": True,
+            "include_migration_barrier": True,
+            "band_gap_backend": "hamgnn",
+            "band_gap_preprocess": True,
+            "mobile_ion": "Li1+",
+            "dimensionality": "3d",
+            "fast_threshold": 0.6,
+            "n_jobs": 1,
+        }
+        with open(config_path, "w") as f:
+            yaml.dump(property_config, f, default_flow_style=False)
 
     # Create comprehensive config if needed (using original benchmarks)
     if not config_path.exists() and config_path.name == "comprehensive.yaml":
@@ -444,6 +506,51 @@ def main(input: str, config_name: str, output: str):
                 metastability_threshold=metastability_threshold,
                 fingerprint_method=fingerprint_method,
                 include_metasun=include_metasun,
+            )
+
+        elif benchmark_type == "migration_barrier":
+            benchmark = MigrationBarrierBenchmark(
+                mobile_ion=config.get("mobile_ion", "Li1+"),
+                dimensionality=config.get("dimensionality", "3d"),
+                r_cut=config.get("r_cut", 10.0),
+                resolution=config.get("resolution", 0.2),
+                k=config.get("k", 100),
+                encut=config.get("encut", 5.0),
+                fast_threshold=config.get("fast_threshold", 0.6),
+                n_jobs=config.get("n_jobs", 1),
+                timeout=config.get("timeout", 30),
+            )
+
+        elif benchmark_type == "band_gap":
+            benchmark = BandGapBenchmark(
+                backend=config.get("backend", "hamgnn"),
+                backend_kwargs=config.get("backend_kwargs", {}),
+                preprocess=config.get("preprocess", True),
+                metal_threshold=config.get("metal_threshold", 0.1),
+                insulator_threshold=config.get("insulator_threshold", 3.0),
+                target_min=config.get("target_min", None),
+                target_max=config.get("target_max", None),
+                n_jobs=config.get("n_jobs", 1),
+                timeout=config.get("timeout", None),
+            )
+
+        elif benchmark_type == "property":
+            benchmark = PropertyBenchmark(
+                include_band_gap=config.get("include_band_gap", True),
+                include_migration_barrier=config.get(
+                    "include_migration_barrier", True
+                ),
+                band_gap_backend=config.get("band_gap_backend", "hamgnn"),
+                band_gap_backend_kwargs=config.get("band_gap_backend_kwargs", {}),
+                band_gap_preprocess=config.get("band_gap_preprocess", True),
+                metal_threshold=config.get("metal_threshold", 0.1),
+                insulator_threshold=config.get("insulator_threshold", 3.0),
+                target_min=config.get("target_min", None),
+                target_max=config.get("target_max", None),
+                mobile_ion=config.get("mobile_ion", "Li1+"),
+                dimensionality=config.get("dimensionality", "3d"),
+                fast_threshold=config.get("fast_threshold", 0.6),
+                n_jobs=config.get("n_jobs", 1),
             )
 
         else:

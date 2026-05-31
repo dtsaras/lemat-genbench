@@ -1,0 +1,48 @@
+# HamGNN inference environment (isolated from lemat-genbench's torch-2.6 env).
+#
+# This is a CPU-default rework of HamGNN/HamGNN.yaml: the upstream file pins
+# China-only tuna mirrors and a CUDA-12.1 stack. We use the standard
+# conda-forge + pytorch channels and a CPU build so it stands up anywhere; for
+# GPU, swap `cpuonly` -> `pytorch-cuda=12.1` (channel `nvidia`) and the pyg
+# wheels to `+pt25cu121` (-f .../torch-2.5.1+cu121.html).
+#
+# Create with:  conda env create -f environment.yml -n hamgnn
+# Then:         conda run -n hamgnn pip install -e /path/to/HamGNN   # console scripts
+name: hamgnn
+channels:
+  - conda-forge
+  - pytorch
+dependencies:
+  - python=3.9
+  - pip
+  - pytorch=2.5.0
+  - cpuonly
+  - pytorch-lightning=1.5.10
+  - e3nn=0.5.0
+  - ase
+  - pymatgen
+  - numpy
+  - scipy
+  - scikit-learn
+  - sympy=1.13.1
+  - pyyaml
+  - tqdm
+  - easydict
+  - prettytable
+  - packaging
+  - opt_einsum
+  - matplotlib
+  - pandas
+  - natsort
+  - numba
+  - setuptools=59.5.0
+  - pip:
+      - -f https://data.pyg.org/whl/torch-2.5.1+cpu.html
+      - torch-geometric==2.6.1
+      - torch-scatter==2.1.2+pt25cpu
+      - torch-sparse==0.6.18+pt25cpu
+      - torch-runstats
+      - torch-ema
+      - opt_einsum_fx
+      - lmdb
+      - seekpath   # band_cal auto_mode k-path (Hinuma et al. 2015)
