@@ -29,6 +29,10 @@ huggingface-cli login
 uv run scripts/run_benchmarks.py --cifs cif_folder --config comprehensive_multi_mlip_hull --name quick_test
 ```
 
+> 📖 **Evaluating a generative model end-to-end** (e.g. a finetuned MatterGen),
+> including the new **band gap** (HamGNN/ALIGNN) and **ion migration barrier**
+> (BVlain) property metrics: see **[EVALUATION.md](EVALUATION.md)**.
+
 ---
 
 ## 📦 Installation
@@ -85,6 +89,12 @@ uv run scripts/run_benchmarks.py --cifs cif_folder --config comprehensive_multi_
 | `stability` | Thermodynamic stability (formation energy, e_above_hull) | High |
 | `hhi` | Supply risk assessment (production/reserve concentration) | Low |
 | `sun` | Composite metric (Stability + Uniqueness + Novelty) | High |
+| `migration_barrier` | Ion migration barrier (BVSE percolation, `bvlain`) | Low |
+| `band_gap` | Electronic band gap (`hamgnn` ab-initio or `alignn` surrogate backend) | High (HamGNN) / Low (ALIGNN) |
+| `property` | Combined band gap + migration barrier | Varies |
+
+> The `migration_barrier` / `band_gap` / `property` families are functional-property
+> metrics. See **[EVALUATION.md](EVALUATION.md)** for setup and usage.
 
 <details>
 <summary><strong>📖 Detailed Metric Descriptions</strong></summary>

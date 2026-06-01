@@ -1,0 +1,12 @@
+description: Ion migration-barrier benchmark (BVSE percolation barriers via bvlain)
+dimensionality: 3d
+encut: 5.0
+fast_threshold: 0.6
+k: 100
+mobile_ion: Li1+
+n_jobs: 1
+r_cut: 10.0
+resolution: 0.2
+timeout: 30
+type: migration_barrier
+version: 0.1.0

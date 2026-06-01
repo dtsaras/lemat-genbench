@@ -768,6 +768,67 @@ def run_remaining_benchmarks(
                 elif family == "stability":
                     stability_settings = config.get("stability_settings", {})
                     benchmark = MultiMLIPStabilityBenchmark(config=stability_settings)
+
+                elif family == "migration_barrier":
+                    # BVSE ion migration barrier (bvlain). Imported lazily so the
+                    # optional dep is only required when this family is requested.
+                    from lemat_genbench.benchmarks.migration_barrier_benchmark import (
+                        MigrationBarrierBenchmark,
+                    )
+
+                    s = config.get("migration_barrier_settings", {})
+                    benchmark = MigrationBarrierBenchmark(
+                        mobile_ion=s.get("mobile_ion", "Li1+"),
+                        dimensionality=s.get("dimensionality", "3d"),
+                        r_cut=s.get("r_cut", 10.0),
+                        resolution=s.get("resolution", 0.2),
+                        encut=s.get("encut", 5.0),
+                        fast_threshold=s.get("fast_threshold", 0.6),
+                        n_jobs=s.get("n_jobs", 1),
+                        timeout=s.get("timeout", 30),
+                    )
+
+                elif family == "band_gap":
+                    # Band gap via pluggable backend (hamgnn / alignn). The backend
+                    # is loaded lazily by the benchmark's preprocessor.
+                    from lemat_genbench.benchmarks.band_gap_benchmark import (
+                        BandGapBenchmark,
+                    )
+
+                    s = config.get("band_gap_settings", {})
+                    benchmark = BandGapBenchmark(
+                        backend=s.get("backend", "hamgnn"),
+                        backend_kwargs=s.get("backend_kwargs", {}),
+                        preprocess=s.get("preprocess", True),
+                        metal_threshold=s.get("metal_threshold", 0.1),
+                        insulator_threshold=s.get("insulator_threshold", 3.0),
+                        target_min=s.get("target_min", None),
+                        target_max=s.get("target_max", None),
+                        n_jobs=s.get("n_jobs", 1),
+                        timeout=s.get("timeout", None),
+                    )
+
+                elif family == "property":
+                    # Combined band gap + migration barrier.
+                    from lemat_genbench.benchmarks.property_benchmark import (
+                        PropertyBenchmark,
+                    )
+
+                    s = config.get("property_settings", {})
+                    benchmark = PropertyBenchmark(
+                        include_band_gap=s.get("include_band_gap", True),
+                        include_migration_barrier=s.get(
+                            "include_migration_barrier", True
+                        ),
+                        band_gap_backend=s.get("band_gap_backend", "hamgnn"),
+                        band_gap_backend_kwargs=s.get("band_gap_backend_kwargs", {}),
+                        mobile_ion=s.get("mobile_ion", "Li1+"),
+                        dimensionality=s.get("dimensionality", "min"),
+                        fast_threshold=s.get("fast_threshold", 0.6),
+                        target_min=s.get("target_min", None),
+                        target_max=s.get("target_max", None),
+                        n_jobs=s.get("n_jobs", 1),
+                    )
                 else:
                     logger.warning(f"Unknown benchmark family: {family}")
                     pbar.set_postfix({"status": "skipped"})

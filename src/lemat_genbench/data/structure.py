@@ -46,7 +46,10 @@ def format_structures(
         if path.is_file():
             files = [path]
         elif path.is_dir():
-            files = list(path.glob("*.jsonl"))
+            # Accept both .jsonl bundles and individual .cif files.
+            files = sorted(path.glob("*.jsonl")) + sorted(path.glob("*.cif"))
+        else:
+            files = []
 
         logger.info(f"Found {len(files)} files in {path}")
 
@@ -56,6 +59,8 @@ def format_structures(
                 structures.extend(
                     [Structure.from_dict(json.loads(line)) for line in open(file)]
                 )
+            elif file.suffix == ".cif":
+                structures.append(Structure.from_file(file))
             else:
                 raise ValueError(f"Unsupported file extension: {file.suffix}")
 
