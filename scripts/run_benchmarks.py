@@ -19,6 +19,7 @@ Usage:
 import argparse
 import gc
 import json
+import os
 import sys
 import time
 from datetime import datetime
@@ -53,7 +54,16 @@ from lemat_genbench.preprocess.multi_mlip_preprocess import (
     MultiMLIPStabilityPreprocessor,
 )
 from lemat_genbench.preprocess.validity_preprocess import ValidityPreprocessor
+from lemat_genbench.utils.hamgnn_readiness import (
+    HAMGNN_READINESS_RECORD_KEY,
+    HAMGNN_READY_KEY,
+    check_hamgnn_readiness,
+)
 from lemat_genbench.utils.logging import logger
+from lemat_genbench.utils.oxidation_state import (
+    MIGRATION_BARRIER_READY_KEY,
+    OXIDATION_STATE_RECORD_KEY,
+)
 
 
 def get_memory_usage():
@@ -402,8 +412,259 @@ def create_preprocessor_config(
     return config
 
 
+def get_property_gating_settings(
+    config: Dict[str, Any], benchmark_families: List[str] | None
+) -> Dict[str, Any]:
+    """Return property-readiness gating settings for this run."""
+    gating = config.get("property_gating", {})
+    gating_enabled = bool(gating.get("enabled", False))
+    families = set(benchmark_families or [])
+    required_families = set(
+        gating.get("required_families", ["migration_barrier", "band_gap", "property"])
+    )
+
+    property_settings = config.get("property_settings", {})
+    band_gap_settings = config.get("band_gap_settings", {})
+    property_requested = "property" in families and "property" in required_families
+    band_gap_backend = str(band_gap_settings.get("backend", "hamgnn")).lower()
+    property_band_gap_backend = str(
+        property_settings.get("band_gap_backend", "hamgnn")
+    ).lower()
+    migration_enabled = bool(
+        gating_enabled
+        and (
+            (
+                "migration_barrier" in families
+                and "migration_barrier" in required_families
+            )
+            or (
+                property_requested
+                and property_settings.get("include_migration_barrier", True)
+            )
+        )
+    )
+    hamgnn_enabled = bool(
+        gating_enabled
+        and gating.get("check_hamgnn_elements", True)
+        and (
+            (
+                "band_gap" in families
+                and "band_gap" in required_families
+                and band_gap_backend == "hamgnn"
+            )
+            or (
+                property_requested
+                and property_settings.get("include_band_gap", True)
+                and property_band_gap_backend == "hamgnn"
+            )
+        )
+    )
+
+    migration_settings = config.get("migration_barrier_settings", {})
+    mobile_ion = (
+        gating.get("mobile_ion")
+        or migration_settings.get("mobile_ion")
+        or property_settings.get("mobile_ion")
+        or config.get("mobile_ion")
+        or "Li1+"
+    )
+    bvlain_settings = {
+        "r_cut": migration_settings.get(
+            "r_cut", property_settings.get("r_cut", config.get("r_cut", 10.0))
+        ),
+        "resolution": migration_settings.get(
+            "resolution",
+            property_settings.get("resolution", config.get("resolution", 0.2)),
+        ),
+        "k": migration_settings.get(
+            "k", property_settings.get("k", config.get("k", 100))
+        ),
+        "encut": migration_settings.get(
+            "encut", property_settings.get("encut", config.get("encut", 5.0))
+        ),
+    }
+    band_gap_backend_kwargs = band_gap_settings.get("backend_kwargs", {}) or {}
+    property_band_gap_kwargs = (
+        property_settings.get("band_gap_backend_kwargs", {}) or {}
+    )
+    hamgnn_dft_data = (
+        gating.get("hamgnn_dft_data")
+        or band_gap_backend_kwargs.get("dft_data")
+        or property_band_gap_kwargs.get("dft_data")
+        or config.get("hamgnn_dft_data")
+        or os.environ.get("HAMGNN_DFT_DATA")
+    )
+    return {
+        "enabled": bool(migration_enabled or hamgnn_enabled),
+        "migration_enabled": migration_enabled,
+        "hamgnn_enabled": hamgnn_enabled,
+        "failure_policy": gating.get("failure_policy", "warn"),
+        "required_families": sorted(required_families),
+        "mobile_ion": mobile_ion,
+        "require_mobile_ion": gating.get("require_mobile_ion", True),
+        "min_num_elements": gating.get("min_num_elements", 2),
+        "check_bvlain_parameters": gating.get("check_bvlain_parameters", True),
+        "oxidation_charge_tolerance": gating.get("oxidation_charge_tolerance", 1e-3),
+        "bvlain_settings": bvlain_settings,
+        "check_hamgnn_elements": gating.get("check_hamgnn_elements", True),
+        "hamgnn_dft_data": hamgnn_dft_data,
+    }
+
+
+def apply_property_gating(
+    valid_structures,
+    config: Dict[str, Any],
+    benchmark_families: List[str] | None,
+    validity_filtering_metadata: Dict[str, Any],
+):
+    """Apply optional property-readiness policy after validity filtering."""
+    settings = get_property_gating_settings(config, benchmark_families)
+    metadata = {
+        "enabled": settings["enabled"],
+        "migration_enabled": settings["migration_enabled"],
+        "hamgnn_enabled": settings["hamgnn_enabled"],
+        "failure_policy": settings["failure_policy"],
+        "mobile_ion": settings["mobile_ion"],
+        "check_bvlain_parameters": settings["check_bvlain_parameters"],
+        "require_mobile_ion": settings["require_mobile_ion"],
+        "min_num_elements": settings["min_num_elements"],
+        "check_hamgnn_elements": settings["check_hamgnn_elements"],
+        "hamgnn_dft_data": settings["hamgnn_dft_data"],
+        "required_families": settings["required_families"],
+    }
+    validity_filtering_metadata["property_gating"] = metadata
+
+    if not settings["enabled"]:
+        return valid_structures, False
+
+    ready_structures = []
+    blocked_structures = []
+    hamgnn_readiness_records = []
+    migration_ready_count = 0
+    hamgnn_ready_count = 0
+    for structure in valid_structures:
+        ready = True
+        failure_reasons = []
+        warnings = []
+        oxidation_state_status = None
+        hamgnn_status = None
+
+        if settings["migration_enabled"]:
+            migration_ready = structure.properties.get(
+                MIGRATION_BARRIER_READY_KEY, False
+            )
+            if migration_ready:
+                migration_ready_count += 1
+            else:
+                ready = False
+                record = structure.properties.get(OXIDATION_STATE_RECORD_KEY, {})
+                oxidation_state_status = record.get("status")
+                failure_reasons.extend(
+                    record.get("failure_reasons", [])
+                    or ["migration-barrier readiness check failed"]
+                )
+                warnings.extend(record.get("warnings", []))
+
+        if settings["hamgnn_enabled"]:
+            hamgnn_record = check_hamgnn_readiness(
+                structure, settings["hamgnn_dft_data"]
+            )
+            structure.properties[HAMGNN_READINESS_RECORD_KEY] = hamgnn_record
+            structure.properties[HAMGNN_READY_KEY] = hamgnn_record.get(
+                HAMGNN_READY_KEY, False
+            )
+            hamgnn_status = hamgnn_record.get("status")
+            hamgnn_readiness_records.append(
+                {
+                    "structure_id": structure.properties.get(
+                        "structure_id", "unknown"
+                    ),
+                    "original_source": structure.properties.get(
+                        "original_source", "unknown"
+                    ),
+                    "record": hamgnn_record,
+                }
+            )
+            if structure.properties[HAMGNN_READY_KEY]:
+                hamgnn_ready_count += 1
+            else:
+                ready = False
+                failure_reasons.extend(
+                    hamgnn_record.get("failure_reasons", [])
+                    or ["HamGNN/OpenMX readiness check failed"]
+                )
+                warnings.extend(hamgnn_record.get("warnings", []))
+
+        if ready:
+            ready_structures.append(structure)
+        else:
+            blocked_structures.append(
+                {
+                    "structure_id": structure.properties.get(
+                        "structure_id", "unknown"
+                    ),
+                    "original_source": structure.properties.get(
+                        "original_source", "unknown"
+                    ),
+                    "oxidation_state_status": oxidation_state_status,
+                    "hamgnn_status": hamgnn_status,
+                    "failure_reasons": failure_reasons,
+                    "warnings": warnings,
+                }
+            )
+
+    policy = settings["failure_policy"]
+    if policy not in {"warn", "filter", "abort_run"}:
+        logger.warning("Unknown property_gating failure_policy=%r; using warn", policy)
+        policy = "warn"
+
+    metadata.update({
+        "failure_policy": policy,
+        "input_valid_structures": len(valid_structures),
+        "ready_structures": len(ready_structures),
+        "blocked_structures": len(blocked_structures),
+        "migration_ready_structures": migration_ready_count
+        if settings["migration_enabled"]
+        else None,
+        "hamgnn_ready_structures": hamgnn_ready_count
+        if settings["hamgnn_enabled"]
+        else None,
+        "ready_structure_ids": [
+            structure.properties.get("structure_id", "unknown")
+            for structure in ready_structures
+        ],
+        "blocked_structure_details": blocked_structures,
+    })
+    if settings["hamgnn_enabled"]:
+        validity_filtering_metadata["hamgnn_readiness_records"] = (
+            hamgnn_readiness_records
+        )
+
+    logger.info(
+        "🔍 Property gating: %s/%s valid structures are property-ready",
+        len(ready_structures),
+        len(valid_structures),
+    )
+
+    if policy == "abort_run" and blocked_structures:
+        logger.error(
+            "❌ Property gating requested abort_run; skipping remaining preprocessors and benchmarks."
+        )
+        return valid_structures, True
+    if policy == "filter":
+        logger.warning(
+            "⚠️  Property gating filtered %s structures before remaining benchmarks.",
+            len(blocked_structures),
+        )
+        return ready_structures, False
+    return valid_structures, False
+
+
 def run_validity_preprocessing_and_filtering(
-    structures, config: Dict[str, Any], monitor_memory: bool = False
+    structures,
+    config: Dict[str, Any],
+    monitor_memory: bool = False,
+    benchmark_families: List[str] | None = None,
 ):
     """Run validity preprocessing and generate benchmark result, then filter to valid structures only.
 
@@ -433,6 +694,15 @@ def run_validity_preprocessing_and_filtering(
     max_mass_density = validity_settings.get("max_mass_density", 25.0)
     check_format = validity_settings.get("check_format", True)
     check_symmetry = validity_settings.get("check_symmetry", True)
+    forbidden_elements = validity_settings.get("forbidden_elements")
+    gating_settings = get_property_gating_settings(config, benchmark_families)
+    if gating_settings["migration_enabled"]:
+        logger.info(
+            "🔍 Enabling migration-barrier readiness checks during validity (%s)",
+            gating_settings["mobile_ion"],
+        )
+    if gating_settings["hamgnn_enabled"]:
+        logger.info("🔍 HamGNN/OpenMX readiness checks will run after validity")
 
     validity_preprocessor = ValidityPreprocessor(
         charge_tolerance=charge_tolerance,
@@ -443,6 +713,14 @@ def run_validity_preprocessing_and_filtering(
         plausibility_max_mass_density=max_mass_density,
         plausibility_check_format=check_format,
         plausibility_check_symmetry=check_symmetry,
+        forbidden_elements=forbidden_elements,
+        assign_oxidation_states=gating_settings["migration_enabled"],
+        mobile_ion=gating_settings["mobile_ion"],
+        require_mobile_ion=gating_settings["require_mobile_ion"],
+        migration_min_num_elements=gating_settings["min_num_elements"],
+        check_bvlain_parameters=gating_settings["check_bvlain_parameters"],
+        oxidation_charge_tolerance=gating_settings["oxidation_charge_tolerance"],
+        bvlain_settings=gating_settings["bvlain_settings"],
     )
 
     # Create source IDs for tracking. Prefer the original CIF filename
@@ -518,6 +796,17 @@ def run_validity_preprocessing_and_filtering(
             f"structure_{i}": source
             for i, source in enumerate(structure_sources)
         },
+        "oxidation_state_records": [
+            {
+                "structure_id": structure.properties.get("structure_id", "unknown"),
+                "original_source": structure.properties.get(
+                    "original_source", "unknown"
+                ),
+                "record": structure.properties.get(OXIDATION_STATE_RECORD_KEY),
+            }
+            for structure in processed_structures
+            if structure.properties.get(OXIDATION_STATE_RECORD_KEY) is not None
+        ],
     }
 
     # Log final memory usage
@@ -819,8 +1108,36 @@ def run_remaining_benchmarks(
                         timeout=s.get("timeout", None),
                     )
 
+                elif family == "esw":
+                    # Li-exchange-only electrochemical stability window.
+                    from lemat_genbench.benchmarks.esw_benchmark import (
+                        ESWBenchmark,
+                    )
+
+                    s = config.get("esw_settings", {})
+                    benchmark = ESWBenchmark(
+                        preprocess=s.get("preprocess", True),
+                        cache_dir=s.get("cache_dir", "data/esw_cache"),
+                        api_key=s.get("api_key", None),
+                        mace_model=s.get("mace_model", None),
+                        device=s.get("device", "auto"),
+                        default_dtype=s.get("default_dtype", "float64"),
+                        fmax=s.get("fmax", 0.05),
+                        max_steps=s.get("max_steps", 500),
+                        mu_min=s.get("mu_min", -5.0),
+                        mu_max=s.get("mu_max", 0.0),
+                        mu_step=s.get("mu_step", 0.01),
+                        gpd_stability_tol=s.get("gpd_stability_tol", 1e-4),
+                        refresh_relax=s.get("refresh_relax", False),
+                        refresh_mp=s.get("refresh_mp", False),
+                        target_min=s.get("target_min", None),
+                        target_max=s.get("target_max", None),
+                        n_jobs=s.get("n_jobs", 1),
+                        timeout=s.get("timeout", None),
+                    )
+
                 elif family == "property":
-                    # Combined band gap + migration barrier.
+                    # Combined functional properties.
                     from lemat_genbench.benchmarks.property_benchmark import (
                         PropertyBenchmark,
                     )
@@ -831,13 +1148,34 @@ def run_remaining_benchmarks(
                         include_migration_barrier=s.get(
                             "include_migration_barrier", True
                         ),
+                        include_esw=s.get("include_esw", False),
                         band_gap_backend=s.get("band_gap_backend", "hamgnn"),
                         band_gap_backend_kwargs=s.get("band_gap_backend_kwargs", {}),
+                        band_gap_preprocess=s.get("band_gap_preprocess", True),
                         mobile_ion=s.get("mobile_ion", "Li1+"),
                         dimensionality=s.get("dimensionality", "min"),
                         fast_threshold=s.get("fast_threshold", 0.6),
                         target_min=s.get("target_min", None),
                         target_max=s.get("target_max", None),
+                        esw_preprocess=s.get("esw_preprocess", True),
+                        esw_cache_dir=s.get("esw_cache_dir", "data/esw_cache"),
+                        esw_api_key=s.get("esw_api_key", None),
+                        esw_mace_model=s.get("esw_mace_model", None),
+                        esw_device=s.get("esw_device", "auto"),
+                        esw_default_dtype=s.get("esw_default_dtype", "float64"),
+                        esw_fmax=s.get("esw_fmax", 0.05),
+                        esw_max_steps=s.get("esw_max_steps", 500),
+                        esw_mu_min=s.get("esw_mu_min", -5.0),
+                        esw_mu_max=s.get("esw_mu_max", 0.0),
+                        esw_mu_step=s.get("esw_mu_step", 0.01),
+                        esw_gpd_stability_tol=s.get(
+                            "esw_gpd_stability_tol", 1e-4
+                        ),
+                        esw_refresh_relax=s.get("esw_refresh_relax", False),
+                        esw_refresh_mp=s.get("esw_refresh_mp", False),
+                        esw_target_min=s.get("esw_target_min", None),
+                        esw_target_max=s.get("esw_target_max", None),
+                        esw_timeout=s.get("esw_timeout", None),
                         n_jobs=s.get("n_jobs", 1),
                     )
                 else:
@@ -1083,15 +1421,51 @@ def main():
         # Step 1: Run validity processing and filtering
         validity_result, valid_structures, validity_filtering_metadata = (
             run_validity_preprocessing_and_filtering(
-                structures, config, args.monitor_memory
+                structures, config, args.monitor_memory, benchmark_families
             )
         )
 
+        valid_structures, property_gating_abort = apply_property_gating(
+            valid_structures, config, benchmark_families, validity_filtering_metadata
+        )
+
+        if property_gating_abort:
+            results_file = save_results(
+                validity_result,
+                {},
+                validity_filtering_metadata,
+                args.name,
+                args.config,
+                n_total_structures,
+            )
+
+            gating = validity_filtering_metadata.get("property_gating", {})
+            print("\n" + "=" * 60)
+            print("⚠️  BENCHMARK RUN STOPPED BY PROPERTY GATING")
+            print("=" * 60)
+            print(f"📁 Results saved to: {results_file}")
+            print(f"📊 Total structures: {n_total_structures}")
+            print(
+                "📊 Structurally valid structures: "
+                f"{gating.get('input_valid_structures', len(valid_structures))}"
+            )
+            print(f"📊 Property-ready structures: {gating.get('ready_structures', 0)}")
+            print(f"📊 Blocked by readiness: {gating.get('blocked_structures', 0)}")
+            print("🔧 Only validity/readiness checks completed")
+            print("=" * 60)
+            return
+
         # Check if we have valid structures to continue
         if len(valid_structures) == 0:
-            logger.error(
-                "❌ No valid structures found. Cannot continue with remaining benchmarks."
-            )
+            gating = validity_filtering_metadata.get("property_gating", {})
+            if gating.get("enabled") and gating.get("input_valid_structures", 0) > 0:
+                logger.error(
+                    "❌ No property-ready structures remain after property gating."
+                )
+            else:
+                logger.error(
+                    "❌ No valid structures found. Cannot continue with remaining benchmarks."
+                )
 
             # Save results with empty remaining benchmarks
             results_file = save_results(
@@ -1164,6 +1538,22 @@ def main():
             f"📊 Invalid structures: {validity_filtering_metadata['invalid_structures']}"
         )
         print(f"📊 Validity rate: {validity_filtering_metadata['validity_rate']:.1%}")
+        gating = validity_filtering_metadata.get("property_gating", {})
+        if gating.get("enabled"):
+            print(
+                f"📊 Property-ready structures: {gating.get('ready_structures', 0)} / "
+                f"{gating.get('input_valid_structures', validity_filtering_metadata['valid_structures'])}"
+            )
+            if gating.get("migration_enabled"):
+                print(
+                    f"📊 Migration-barrier ready: {gating.get('migration_ready_structures', 0)} / "
+                    f"{gating.get('input_valid_structures', validity_filtering_metadata['valid_structures'])}"
+                )
+            if gating.get("hamgnn_enabled"):
+                print(
+                    f"📊 HamGNN/OpenMX ready: {gating.get('hamgnn_ready_structures', 0)} / "
+                    f"{gating.get('input_valid_structures', validity_filtering_metadata['valid_structures'])}"
+                )
         print(
             f"🔍 Fingerprint method: {config.get('fingerprint_method', args.fingerprint_method)}"
         )

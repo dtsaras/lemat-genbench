@@ -7,6 +7,8 @@ core stability / S.U.N. metrics:
   barriers (pure-CPU, via the optional ``bvlain`` dependency).
 * :mod:`~lemat_genbench.properties.band_gap_backends` — pluggable band-gap
   predictors (ALIGNN / MatGL now; HamGNN slot for later).
+* :mod:`~lemat_genbench.properties.esw` — Li-exchange-only electrochemical
+  stability windows (MACE relaxation + Materials Project entries).
 
 Predictors import their heavy/optional dependencies lazily, so importing this
 package never requires those extras to be installed.

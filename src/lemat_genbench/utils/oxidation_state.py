@@ -1,14 +1,23 @@
 import json
 import math
+import re
 from collections import defaultdict
 from itertools import combinations_with_replacement, product
 from pathlib import Path
 
 import numpy as np
+from pymatgen.analysis.bond_valence import BVAnalyzer, calculate_bv_sum
+from pymatgen.analysis.local_env import get_neighbors_of_site_with_index
+from pymatgen.core.composition import Composition
 from pymatgen.core.periodic_table import Element, Species
+from pymatgen.core.structure import Structure
 from pymatgen.symmetry.analyzer import SpacegroupAnalyzer
 
 from lemat_genbench.utils.logging import logger
+
+
+OXIDATION_STATE_RECORD_KEY = "oxidation_state_record"
+MIGRATION_BARRIER_READY_KEY = "migration_barrier_ready"
 
 
 def electronegativity_correlation(
@@ -368,3 +377,499 @@ def build_oxi_state_map(oxi_dict_sorted):
 
 def sign_to_int(char):
     return {"+": 1, "-": -1}.get(char, 0)  # default to 0 if unexpected
+
+
+def parse_mobile_ion(mobile_ion: str) -> tuple[str, float | None]:
+    """Parse a pymatgen-style mobile ion string, e.g. ``Li1+`` -> (Li, 1)."""
+    match = re.fullmatch(r"([A-Z][a-z]?)(?:(\d+(?:\.\d+)?)([+-])|([+-]))?", mobile_ion)
+    if not match:
+        return mobile_ion, None
+    symbol, mag, sign, bare_sign = match.groups()
+    if sign or bare_sign:
+        charge = float(mag or 1)
+        if (sign or bare_sign) == "-":
+            charge *= -1
+        return symbol, charge
+    return symbol, None
+
+
+def _site_symbol(site) -> str:
+    specie = site.specie
+    return str(getattr(specie, "symbol", specie))
+
+
+def _site_oxi_state(site) -> float | None:
+    oxi = getattr(site.specie, "oxi_state", None)
+    return None if oxi is None else float(oxi)
+
+
+def _round_num(value: float | None) -> float | None:
+    if value is None or np.isnan(value):
+        return None
+    rounded = round(float(value), 6)
+    return int(rounded) if rounded == int(rounded) else rounded
+
+
+def _site_records_from_structure(structure: Structure) -> list[dict]:
+    records = []
+    for idx, site in enumerate(structure.sites):
+        oxi = _site_oxi_state(site)
+        if oxi is None:
+            return []
+        records.append(
+            {
+                "site_index": idx,
+                "element": _site_symbol(site),
+                "oxi_state": _round_num(oxi),
+            }
+        )
+    return records
+
+
+def _states_by_element(site_records: list[dict]) -> dict:
+    grouped: dict[str, list] = defaultdict(list)
+    for rec in site_records:
+        grouped[rec["element"]].append(rec["oxi_state"])
+    out = {}
+    for element, values in grouped.items():
+        unique = sorted(set(values))
+        out[element] = unique[0] if len(unique) == 1 else unique
+    return out
+
+
+def decorated_structure_from_oxidation_record(
+    structure: Structure, record: dict | None = None
+) -> Structure:
+    """Return a copy decorated with oxidation states stored in a record."""
+    record = record or structure.properties.get(OXIDATION_STATE_RECORD_KEY)
+    if not record or not record.get("oxidation_states_by_site"):
+        raise ValueError("No oxidation-state record available")
+
+    site_states = record["oxidation_states_by_site"]
+    if len(site_states) != len(structure):
+        raise ValueError("Oxidation-state record does not match structure length")
+
+    decorated = structure.copy()
+    try:
+        decorated.remove_oxidation_states()
+    except Exception:
+        pass
+    decorated.add_oxidation_state_by_site(
+        [float(rec["oxi_state"]) for rec in site_states]
+    )
+    return decorated
+
+
+def _candidate_from_structure(source: str, decorated: Structure, score=None) -> dict:
+    site_records = _site_records_from_structure(decorated)
+    if not site_records:
+        raise ValueError("candidate has no site-specific oxidation states")
+    return {
+        "source": source,
+        "oxidation_states_by_site": site_records,
+        "oxidation_states_by_element": _states_by_element(site_records),
+        "prior_score": _round_num(score) if score is not None else None,
+    }
+
+
+def _candidate_from_combo(structure: Structure, source: str, combo: dict, score=None) -> dict:
+    counts: defaultdict[str, int] = defaultdict(int)
+    site_states = []
+    for idx, site in enumerate(structure.sites):
+        element = _site_symbol(site)
+        values = combo.get(element)
+        if values is None:
+            raise ValueError(f"missing oxidation state for {element}")
+        if isinstance(values, (list, tuple)):
+            pos = min(counts[element], len(values) - 1)
+            oxi_state = values[pos]
+            counts[element] += 1
+        else:
+            oxi_state = values
+        site_states.append(
+            {
+                "site_index": idx,
+                "element": element,
+                "oxi_state": _round_num(float(oxi_state)),
+            }
+        )
+    return {
+        "source": source,
+        "oxidation_states_by_site": site_states,
+        "oxidation_states_by_element": _states_by_element(site_states),
+        "prior_score": _round_num(score) if score is not None else None,
+    }
+
+
+def _load_oxi_state_mapping() -> dict:
+    here = Path(__file__).resolve().parent
+    three_up = here.parents[2]
+    path = three_up / "data" / "lemat_icsd_oxi_state_mapping.json"
+    if not path.exists():
+        path = here.parent / "data" / "lemat_icsd_oxi_state_mapping.json"
+    with open(path, "r") as f:
+        return json.load(f)
+
+
+def _composition_candidates(
+    structure: Structure, max_candidates: int
+) -> list[dict]:
+    comp = Composition(structure.composition.element_composition)
+    oxi_state_mapping = _load_oxi_state_mapping()
+    overrides = {
+        str(el): oxi_state_mapping[str(el)]
+        for el in comp.elements
+        if str(el) in oxi_state_mapping
+    }
+    candidates = []
+
+    for all_oxi_states, source in (
+        (False, "composition_guess"),
+        (True, "composition_guess_all_states"),
+    ):
+        try:
+            _, combos, scores = compositional_oxi_state_guesses(
+                comp,
+                all_oxi_states=all_oxi_states,
+                max_sites=-1,
+                target_charge=0,
+                oxi_states_override=None if all_oxi_states else overrides,
+            )
+        except Exception as exc:
+            logger.debug("Composition oxidation-state guesses failed: %s", exc)
+            continue
+
+        for combo, score in list(zip(combos, scores))[:max_candidates]:
+            try:
+                candidates.append(_candidate_from_combo(structure, source, combo, score))
+            except Exception as exc:
+                logger.debug("Could not build oxidation candidate: %s", exc)
+        if candidates:
+            break
+    return candidates
+
+
+def _compute_bvs_mismatch(structure: Structure, candidate: dict) -> dict:
+    decorated = decorated_structure_from_oxidation_record(structure, candidate)
+    mismatches = []
+    mobile = []
+    for rec in candidate["oxidation_states_by_site"]:
+        idx = rec["site_index"]
+        try:
+            nn_list = get_neighbors_of_site_with_index(decorated, idx)
+            bvs = calculate_bv_sum(decorated[idx], nn_list)
+            mismatch = abs(abs(float(bvs)) - abs(float(rec["oxi_state"])))
+            mismatches.append(mismatch)
+            if rec.get("_is_mobile_ion"):
+                mobile.append(mismatch)
+        except Exception as exc:
+            logger.debug("BVS mismatch failed for site %s: %s", idx, exc)
+
+    if not mismatches:
+        return {
+            "mean_abs_mismatch": None,
+            "max_abs_mismatch": None,
+            "p90_abs_mismatch": None,
+            "mobile_ion_mean_abs_mismatch": None,
+        }
+    return {
+        "mean_abs_mismatch": _round_num(float(np.mean(mismatches))),
+        "max_abs_mismatch": _round_num(float(np.max(mismatches))),
+        "p90_abs_mismatch": _round_num(float(np.percentile(mismatches, 90))),
+        "mobile_ion_mean_abs_mismatch": _round_num(float(np.mean(mobile)))
+        if mobile
+        else None,
+    }
+
+
+def _chemical_failures(site_records: list[dict]) -> list[str]:
+    failures = []
+    alkali = {"Li", "Na", "K", "Rb", "Cs"}
+    alkaline = {"Mg", "Ca", "Sr", "Ba"}
+    for rec in site_records:
+        el = rec["element"]
+        ox = float(rec["oxi_state"])
+        if el in alkali and ox != 1:
+            failures.append(f"{el} expected +1, got {ox:g}")
+        elif el in alkaline and ox != 2:
+            failures.append(f"{el} expected +2, got {ox:g}")
+        elif el == "F" and ox != -1:
+            failures.append(f"F expected -1, got {ox:g}")
+        elif el == "O" and ox > 0:
+            failures.append(f"O has positive oxidation state {ox:g}")
+    return failures
+
+
+def _check_bvlain_candidate(
+    structure: Structure,
+    candidate: dict,
+    mobile_ion: str,
+    check_bvlain_parameters: bool | str,
+    bvlain_settings: dict | None,
+) -> tuple[bool | None, list[str], list[str]]:
+    if not check_bvlain_parameters:
+        return None, ["bvlain parameter check skipped"], []
+
+    try:
+        from bvlain import Lain
+    except ImportError:
+        msg = "bvlain is not installed"
+        if check_bvlain_parameters == "auto":
+            return None, [msg], []
+        return False, [], [msg]
+
+    bvlain_settings = bvlain_settings or {}
+    try:
+        decorated = decorated_structure_from_oxidation_record(structure, candidate)
+        calc = Lain(verbose=False)
+        calc.read_structure(decorated, oxi_check=False)
+        calc.bvse_distribution(
+            mobile_ion=mobile_ion,
+            r_cut=bvlain_settings.get("r_cut", 10.0),
+            resolution=bvlain_settings.get("resolution", 0.2),
+            k=bvlain_settings.get("k", 100),
+        )
+        return True, [], []
+    except Exception as exc:
+        return False, [], [f"bvlain parameter check failed: {exc}"]
+
+
+def _validate_oxidation_candidate(
+    structure: Structure,
+    candidate: dict,
+    *,
+    mobile_ion: str,
+    charge_tolerance: float,
+    require_mobile_ion: bool,
+    check_bvlain_parameters: bool | str,
+    bvlain_settings: dict | None,
+) -> dict:
+    site_records = candidate["oxidation_states_by_site"]
+    mobile_symbol, mobile_charge = parse_mobile_ion(mobile_ion)
+    failures = []
+    warnings = []
+
+    total_charge = sum(float(rec["oxi_state"]) for rec in site_records)
+    if abs(total_charge) > charge_tolerance:
+        failures.append(f"total charge not neutral: {total_charge:g}")
+
+    mobile_records = [rec for rec in site_records if rec["element"] == mobile_symbol]
+    for rec in mobile_records:
+        rec["_is_mobile_ion"] = True
+    if require_mobile_ion and not mobile_records:
+        failures.append(f"mobile ion {mobile_symbol} not present")
+    if mobile_charge is not None:
+        for rec in mobile_records:
+            if abs(float(rec["oxi_state"]) - mobile_charge) > charge_tolerance:
+                failures.append(
+                    f"mobile ion {mobile_ion} mismatch at site "
+                    f"{rec['site_index']}: {rec['oxi_state']}"
+                )
+
+    failures.extend(_chemical_failures(site_records))
+    mismatch = _compute_bvs_mismatch(structure, candidate)
+    bvlain_complete, bvlain_warnings, bvlain_failures = _check_bvlain_candidate(
+        structure,
+        candidate,
+        mobile_ion=mobile_ion,
+        check_bvlain_parameters=check_bvlain_parameters,
+        bvlain_settings=bvlain_settings,
+    )
+    warnings.extend(bvlain_warnings)
+    failures.extend(bvlain_failures)
+
+    return {
+        **candidate,
+        **mismatch,
+        "total_charge": _round_num(total_charge),
+        "passed": not failures,
+        "bvlain_parameters_complete": bvlain_complete,
+        "warnings": warnings,
+        "failure_reasons": failures,
+    }
+
+
+def _confidence_label(candidate: dict) -> str:
+    if not candidate.get("passed"):
+        return "failed"
+    mean = candidate.get("mean_abs_mismatch")
+    max_m = candidate.get("max_abs_mismatch")
+    warnings = candidate.get("warnings") or []
+    if mean is None or max_m is None:
+        return "usable_with_warning"
+    if mean <= 0.20 and max_m <= 0.60 and not warnings:
+        return "high_confidence"
+    if mean <= 0.40 and max_m <= 1.00:
+        return "medium_confidence"
+    if mean <= 0.60 and max_m <= 1.50:
+        return "low_confidence"
+    return "usable_with_warning"
+
+
+def assign_oxidation_states_for_bvlain(
+    structure: Structure,
+    *,
+    mobile_ion: str = "Li1+",
+    charge_tolerance: float = 1e-3,
+    require_mobile_ion: bool = False,
+    min_num_elements: int | None = None,
+    check_bvlain_parameters: bool | str = False,
+    bvlain_settings: dict | None = None,
+    max_candidates: int = 16,
+) -> dict:
+    """Assign oxidation states and return a JSON-serializable readiness record."""
+    elements = sorted(
+        str(getattr(el, "symbol", el)) for el in structure.composition.elements
+    )
+    mobile_symbol, _ = parse_mobile_ion(mobile_ion)
+    precheck_failures = []
+    if require_mobile_ion and mobile_symbol not in elements:
+        precheck_failures.append(f"mobile ion {mobile_symbol} not present")
+    if min_num_elements is not None and len(elements) < min_num_elements:
+        precheck_failures.append(
+            f"number of elements {len(elements)} is less than required "
+            f"minimum {min_num_elements}"
+        )
+    if precheck_failures:
+        return {
+            "status": "failed",
+            "selected_source": None,
+            "confidence_label": "failed",
+            "mobile_ion": mobile_ion,
+            "elements": elements,
+            "num_elements": len(elements),
+            "min_num_elements": min_num_elements,
+            "migration_barrier_ready": False,
+            "failure_reasons": precheck_failures,
+            "warnings": [],
+            "candidate_summary": [],
+        }
+
+    candidates = []
+
+    if _site_records_from_structure(structure):
+        try:
+            candidates.append(_candidate_from_structure("cif", structure))
+        except Exception as exc:
+            logger.debug("Could not use existing oxidation states: %s", exc)
+
+    try:
+        candidates.append(
+            _candidate_from_structure(
+                "bvanalyzer", BVAnalyzer().get_oxi_state_decorated_structure(structure)
+            )
+        )
+    except Exception as exc:
+        logger.debug("BVAnalyzer oxidation-state assignment failed: %s", exc)
+
+    try:
+        candidates.extend(_composition_candidates(structure, max_candidates))
+    except Exception as exc:
+        logger.debug("Composition oxidation-state candidates failed: %s", exc)
+
+    seen = set()
+    unique_candidates = []
+    for cand in candidates:
+        key = tuple(rec["oxi_state"] for rec in cand["oxidation_states_by_site"])
+        if key not in seen:
+            seen.add(key)
+            unique_candidates.append(cand)
+
+    evaluated = [
+        _validate_oxidation_candidate(
+            structure,
+            cand,
+            mobile_ion=mobile_ion,
+            charge_tolerance=charge_tolerance,
+            require_mobile_ion=require_mobile_ion,
+            check_bvlain_parameters=check_bvlain_parameters,
+            bvlain_settings=bvlain_settings,
+        )
+        for cand in unique_candidates[:max_candidates]
+    ]
+
+    source_priority = {
+        "cif": 0,
+        "bvanalyzer": 1,
+        "composition_guess": 2,
+        "composition_guess_all_states": 3,
+    }
+
+    def rank_key(cand: dict):
+        return (
+            cand.get("mean_abs_mismatch")
+            if cand.get("mean_abs_mismatch") is not None
+            else float("inf"),
+            cand.get("max_abs_mismatch")
+            if cand.get("max_abs_mismatch") is not None
+            else float("inf"),
+            cand.get("mobile_ion_mean_abs_mismatch")
+            if cand.get("mobile_ion_mean_abs_mismatch") is not None
+            else float("inf"),
+            source_priority.get(cand["source"], 99),
+        )
+
+    valid_candidates = [cand for cand in evaluated if cand["passed"]]
+    selected = sorted(valid_candidates, key=rank_key)[0] if valid_candidates else None
+    if selected is None:
+        reasons = []
+        for cand in evaluated:
+            reasons.extend(cand.get("failure_reasons", []))
+        return {
+            "status": "failed",
+            "selected_source": None,
+            "confidence_label": "failed",
+            "mobile_ion": mobile_ion,
+            "elements": elements,
+            "num_elements": len(elements),
+            "min_num_elements": min_num_elements,
+            "migration_barrier_ready": False,
+            "failure_reasons": sorted(set(reasons)) or ["no oxidation-state candidate"],
+            "warnings": [],
+            "candidate_summary": _candidate_summary(evaluated),
+        }
+
+    bvlain_complete = selected.get("bvlain_parameters_complete")
+    ready = selected["passed"] and bvlain_complete is not False
+    return {
+        "status": "success",
+        "selected_source": selected["source"],
+        "confidence_label": _confidence_label(selected),
+        "mobile_ion": mobile_ion,
+        "elements": elements,
+        "num_elements": len(elements),
+        "min_num_elements": min_num_elements,
+        "total_charge": selected["total_charge"],
+        "mean_abs_mismatch": selected["mean_abs_mismatch"],
+        "max_abs_mismatch": selected["max_abs_mismatch"],
+        "p90_abs_mismatch": selected["p90_abs_mismatch"],
+        "mobile_ion_mean_abs_mismatch": selected["mobile_ion_mean_abs_mismatch"],
+        "oxidation_states_by_element": selected["oxidation_states_by_element"],
+        "oxidation_states_by_site": [
+            {k: v for k, v in rec.items() if not k.startswith("_")}
+            for rec in selected["oxidation_states_by_site"]
+        ],
+        "bvlain_parameters_complete": bvlain_complete,
+        "missing_bvlain_parameters": selected["failure_reasons"]
+        if bvlain_complete is False
+        else [],
+        "migration_barrier_ready": ready,
+        "warnings": selected["warnings"],
+        "failure_reasons": selected["failure_reasons"],
+        "candidate_summary": _candidate_summary(evaluated),
+    }
+
+
+def _candidate_summary(candidates: list[dict]) -> list[dict]:
+    return [
+        {
+            "source": cand.get("source"),
+            "passed": cand.get("passed", False),
+            "mean_abs_mismatch": cand.get("mean_abs_mismatch"),
+            "max_abs_mismatch": cand.get("max_abs_mismatch"),
+            "bvlain_parameters_complete": cand.get("bvlain_parameters_complete"),
+            "warnings": cand.get("warnings", []),
+            "failure_reasons": cand.get("failure_reasons", []),
+        }
+        for cand in candidates
+    ]

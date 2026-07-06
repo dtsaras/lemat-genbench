@@ -135,7 +135,7 @@ There are two entry points:
 - **`scripts/run_benchmarks.py`** — the comprehensive runner (recommended for
   evaluating a model). It loads a CIF directory, **always runs validity first and
   filters to valid structures**, then runs the benchmark *families* you request
-  (incl. the new `migration_barrier` / `band_gap` / `property` families). Results
+  (incl. the new `migration_barrier` / `band_gap` / `esw` / `property` families). Results
   → `results_final/<name>_<config>_<timestamp>.json`.
 - **`lemat-genbench <input> <benchmark>`** — a lighter CLI that runs a single
   benchmark and writes a YAML. Good for quick, one-off property runs.
@@ -144,7 +144,7 @@ There are two entry points:
 
 ```bash
 # Full model evaluation: validity (mandatory) + S.U.N. + stability + properties.
-# 'migration_barrier' is cheap; 'band_gap' (HamGNN) is slow — include deliberately.
+# 'migration_barrier' is cheap; 'band_gap' (HamGNN) and 'esw' are slow — include deliberately.
 uv run scripts/run_benchmarks.py \
   --cifs ./gen_cifs \
   --config comprehensive \
@@ -157,10 +157,11 @@ uv run scripts/run_benchmarks.py \
   column).
 - `--families` selects what to run (validity always runs). Omit it for the default
   comprehensive set (distribution, diversity, novelty, uniqueness, hhi, sun,
-  stability) — add `migration_barrier` / `band_gap` / `property` to include the
+  stability) — add `migration_barrier` / `band_gap` / `esw` / `property` to include the
   functional-property metrics.
 - Per-family settings can be added to the `--config` YAML under
-  `migration_barrier_settings:` / `band_gap_settings:` / `property_settings:`
+  `migration_barrier_settings:` / `band_gap_settings:` / `esw_settings:` /
+  `property_settings:`
   (otherwise sensible defaults are used).
 
 For the **band_gap** family with HamGNN, export the `HAMGNN_*` vars (Step 1c)
@@ -235,6 +236,12 @@ Each run prints a summary and writes `final_scores` to the YAML.
 - `fraction_in_target_window` — set `target_min`/`target_max` in the config to
   score "fraction of generated structures in my desired gap range."
 
+**ESW** (`esw_*`):
+- `mean_esw`, `median/min/max_esw` (V/eV width).
+- `fraction_esw_valid` — fraction of valid structures where MACE relaxation,
+  MP-entry lookup, and Li-exchange-only ESW calculation succeeded.
+- `fraction_in_target_window` — set `target_min`/`target_max` in the config.
+
 **Worked sanity check** (real MP structures, verified):
 
 | structure | HamGNN gap | BVlain barrier (min) |
@@ -247,14 +254,22 @@ Each run prints a summary and writes `final_scores` to the YAML.
 
 ## Configuration reference
 
+`comprehensive.yaml` keys: `validity_settings` for the mandatory validity filter,
+`property_gating` for optional property-readiness filtering when running
+`migration_barrier` / `band_gap` / `property`, plus per-family `*_settings` blocks.
+
 `migration_barrier.yaml` keys: `mobile_ion`, `dimensionality` (`1d`/`2d`/`3d`/`min`),
 `r_cut`, `resolution`, `k`, `encut`, `fast_threshold`, `n_jobs`, `timeout`.
 
 `band_gap.yaml` keys: `backend` (`hamgnn`/`alignn`), `backend_kwargs`, `preprocess`,
 `metal_threshold`, `insulator_threshold`, `target_min`, `target_max`, `n_jobs`, `timeout`.
 
+`esw_settings` keys: `preprocess`, `cache_dir`, `api_key`, `mace_model`, `device`,
+`default_dtype`, `fmax`, `max_steps`, `mu_min`, `mu_max`, `mu_step`,
+`gpd_stability_tol`, `target_min`, `target_max`, `n_jobs`, `timeout`.
+
 `property.yaml` keys: `include_band_gap`, `include_migration_barrier`,
-`band_gap_backend`, plus the band-gap and migration keys above.
+`include_esw`, `band_gap_backend`, plus the band-gap, migration, and ESW keys above.
 
 Configs live in `src/lemat_genbench/config/` (auto-created with defaults), or pass
 any YAML path as the `<BENCHMARK>` argument.
@@ -274,6 +289,10 @@ any YAML path as the `<BENCHMARK>` argument.
   vacancy-mediated NEB/experimental barriers (~1.1 eV here vs ~0.3–0.8 eV
   experimentally for layered oxides). Use them to **rank** generated structures,
   not as absolute activation energies.
+- **ESW is Li-exchange-only.** The implemented ESW checks for zero net Li uptake
+  or release over a Li chemical-potential window. It uses MACE-relaxed generated
+  structures and Materials Project phase-diagram entries, so interpret it as a
+  screening metric tied to that energy/reference setup.
 
 ---
 
@@ -289,4 +308,6 @@ any YAML path as the `<BENCHMARK>` argument.
   against torch 2.6, prefer the HamGNN backend or pin a compatible dgl.
 - **Slow band-gap runs** — HamGNN is minutes/structure. Sweep with `alignn`, or
   evaluate a representative sample, then spot-check with HamGNN.
+- **ESW returns no valid values** — check `MP_API_KEY`, the MACE model path
+  (`MACE_MODEL_PATH` or `esw_settings.mace_model`), and `data/esw_cache`.
 ```

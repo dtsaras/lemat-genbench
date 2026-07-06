@@ -1,0 +1,21 @@
+type: esw
+description: Li-exchange-only electrochemical stability window benchmark
+version: 0.1.0
+preprocess: true
+cache_dir: data/esw_cache
+api_key: null
+mace_model: null
+device: auto
+default_dtype: float64
+fmax: 0.05
+max_steps: 500
+mu_min: -5.0
+mu_max: 0.0
+mu_step: 0.01
+gpd_stability_tol: 0.0001
+refresh_relax: false
+refresh_mp: false
+target_min: null
+target_max: null
+n_jobs: 1
+timeout: null

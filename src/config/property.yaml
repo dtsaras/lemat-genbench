@@ -1,11 +1,30 @@
-band_gap_backend: hamgnn
-band_gap_preprocess: true
-description: Combined functional-property benchmark (band gap + migration barrier)
-dimensionality: 3d
-fast_threshold: 0.6
 include_band_gap: true
 include_migration_barrier: true
+include_esw: false
+band_gap_backend: hamgnn
+band_gap_backend_kwargs: {}
+band_gap_preprocess: true
+description: Combined functional-property benchmark
+dimensionality: 3d
+fast_threshold: 0.6
 mobile_ion: Li1+
+esw_preprocess: true
+esw_cache_dir: data/esw_cache
+esw_api_key: null
+esw_mace_model: null
+esw_device: auto
+esw_default_dtype: float64
+esw_fmax: 0.05
+esw_max_steps: 500
+esw_mu_min: -5.0
+esw_mu_max: 0.0
+esw_mu_step: 0.01
+esw_gpd_stability_tol: 0.0001
+esw_refresh_relax: false
+esw_refresh_mp: false
+esw_target_min: null
+esw_target_max: null
+esw_timeout: null
 n_jobs: 1
 type: property
 version: 0.1.0

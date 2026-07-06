@@ -38,6 +38,13 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from lemat_genbench.utils.oxidation_state import (
+    MIGRATION_BARRIER_READY_KEY,
+    OXIDATION_STATE_RECORD_KEY,
+    assign_oxidation_states_for_bvlain,
+    decorated_structure_from_oxidation_record,
+)
+
 logger = logging.getLogger(__name__)
 
 # eV. Returned when bvlain runs but finds no percolating path at the requested
@@ -66,6 +73,25 @@ def is_available() -> bool:
 def _mobile_ion_symbol(mobile_ion: str) -> str:
     """Strip the charge from a pymatgen-style ion string ('Li1+' -> 'Li')."""
     return "".join(c for c in mobile_ion if c.isalpha())
+
+
+def _run_lain(
+    structure: Any,
+    lain_cls: Any,
+    *,
+    mobile_ion: str,
+    r_cut: float,
+    resolution: float,
+    k: int,
+    encut: float,
+    oxi_check: bool,
+) -> dict:
+    calc = lain_cls(verbose=False)
+    calc.read_structure(structure, oxi_check=oxi_check)
+    calc.bvse_distribution(
+        mobile_ion=mobile_ion, r_cut=r_cut, resolution=resolution, k=k
+    )
+    return calc.percolation_barriers(encut=encut)
 
 
 def compute_barriers(
@@ -127,11 +153,65 @@ def compute_barriers(
             "Install it with:  pip install bvlain   (or: uv sync --extra migration)"
         ) from exc
 
+    last_err: Exception | None = None
+
+    record = getattr(structure, "properties", {}).get(OXIDATION_STATE_RECORD_KEY)
+    if (
+        record
+        and record.get("status") == "success"
+        and record.get("mobile_ion") == mobile_ion
+        and record.get(MIGRATION_BARRIER_READY_KEY, True)
+    ):
+        try:
+            decorated = decorated_structure_from_oxidation_record(structure, record)
+            barriers = _run_lain(
+                decorated,
+                Lain,
+                mobile_ion=mobile_ion,
+                r_cut=r_cut,
+                resolution=resolution,
+                k=k,
+                encut=encut,
+                oxi_check=False,
+            )
+            if barriers:
+                return _coerce_barriers(barriers, no_percolation_sentinel)
+        except Exception as exc:  # noqa: BLE001 - keep original fallback chain
+            last_err = exc
+            logger.debug("bvlain cached oxidation-state path failed: %s", exc)
+
+    if not record:
+        try:
+            record = assign_oxidation_states_for_bvlain(
+                structure,
+                mobile_ion=mobile_ion,
+                require_mobile_ion=True,
+                check_bvlain_parameters=False,
+            )
+            if record.get("status") == "success":
+                decorated = decorated_structure_from_oxidation_record(
+                    structure, record
+                )
+                barriers = _run_lain(
+                    decorated,
+                    Lain,
+                    mobile_ion=mobile_ion,
+                    r_cut=r_cut,
+                    resolution=resolution,
+                    k=k,
+                    encut=encut,
+                    oxi_check=False,
+                )
+                if barriers:
+                    return _coerce_barriers(barriers, no_percolation_sentinel)
+        except Exception as exc:  # noqa: BLE001 - keep original fallback chain
+            last_err = exc
+            logger.debug("bvlain assigned oxidation-state path failed: %s", exc)
+
     # Oxidation-state assignment fallback chain. Generator outputs often trip
     # BVAnalyzer's local BVS minimisation even when the composition is sensible,
     # so we fall back to a composition-level guess. Both operate on a defensive
     # ``.copy()`` so bvlain's in-place mutations never leak back to the caller.
-    last_err: Exception | None = None
     for path_name, decorate in (
         ("oxi_check=True", lambda s: s.copy()),
         (
@@ -141,12 +221,16 @@ def compute_barriers(
     ):
         try:
             s_for_bv = decorate(structure)
-            calc = Lain(verbose=False)
-            calc.read_structure(s_for_bv, oxi_check=(path_name == "oxi_check=True"))
-            calc.bvse_distribution(
-                mobile_ion=mobile_ion, r_cut=r_cut, resolution=resolution, k=k
+            barriers = _run_lain(
+                s_for_bv,
+                Lain,
+                mobile_ion=mobile_ion,
+                r_cut=r_cut,
+                resolution=resolution,
+                k=k,
+                encut=encut,
+                oxi_check=(path_name == "oxi_check=True"),
             )
-            barriers = calc.percolation_barriers(encut=encut)
             if barriers:
                 return _coerce_barriers(barriers, no_percolation_sentinel)
             # Empty result -> treat as a failed path and try the next fallback.

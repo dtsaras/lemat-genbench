@@ -19,6 +19,7 @@ from lemat_genbench.benchmarks.distribution_benchmark import (
 from lemat_genbench.benchmarks.diversity_benchmark import (
     DiversityBenchmark,
 )
+from lemat_genbench.benchmarks.esw_benchmark import ESWBenchmark
 from lemat_genbench.benchmarks.hhi_benchmark import HHIBenchmark
 from lemat_genbench.benchmarks.migration_barrier_benchmark import (
     MigrationBarrierBenchmark,
@@ -240,19 +241,61 @@ def load_benchmark_config(config_name: str) -> dict:
         with open(config_path, "w") as f:
             yaml.dump(band_gap_config, f, default_flow_style=False)
 
-    # Add combined property config creation (band gap + migration barrier)
+    # Add ESW config creation (Li-exchange-only electrochemical stability window)
+    if not config_path.exists() and config_path.name == "esw.yaml":
+        esw_config = {
+            "type": "esw",
+            "description": "Li-exchange-only electrochemical stability window benchmark",
+            "version": "0.1.0",
+            "preprocess": True,
+            "cache_dir": "data/esw_cache",
+            "api_key": None,
+            "mace_model": None,
+            "device": "auto",
+            "default_dtype": "float64",
+            "fmax": 0.05,
+            "max_steps": 500,
+            "mu_min": -5.0,
+            "mu_max": 0.0,
+            "mu_step": 0.01,
+            "gpd_stability_tol": 0.0001,
+            "target_min": None,
+            "target_max": None,
+            "n_jobs": 1,
+            "timeout": None,
+        }
+        with open(config_path, "w") as f:
+            yaml.dump(esw_config, f, default_flow_style=False)
+
+    # Add combined property config creation (band gap + migration barrier + ESW)
     if not config_path.exists() and config_path.name == "property.yaml":
         property_config = {
             "type": "property",
-            "description": "Combined functional-property benchmark (band gap + migration barrier)",
+            "description": "Combined functional-property benchmark",
             "version": "0.1.0",
             "include_band_gap": True,
             "include_migration_barrier": True,
+            "include_esw": False,
             "band_gap_backend": "hamgnn",
             "band_gap_preprocess": True,
             "mobile_ion": "Li1+",
             "dimensionality": "3d",
             "fast_threshold": 0.6,
+            "esw_preprocess": True,
+            "esw_cache_dir": "data/esw_cache",
+            "esw_api_key": None,
+            "esw_mace_model": None,
+            "esw_device": "auto",
+            "esw_default_dtype": "float64",
+            "esw_fmax": 0.05,
+            "esw_max_steps": 500,
+            "esw_mu_min": -5.0,
+            "esw_mu_max": 0.0,
+            "esw_mu_step": 0.01,
+            "esw_gpd_stability_tol": 0.0001,
+            "esw_target_min": None,
+            "esw_target_max": None,
+            "esw_timeout": None,
             "n_jobs": 1,
         }
         with open(config_path, "w") as f:
@@ -534,12 +577,35 @@ def main(input: str, config_name: str, output: str):
                 timeout=config.get("timeout", None),
             )
 
+        elif benchmark_type == "esw":
+            benchmark = ESWBenchmark(
+                preprocess=config.get("preprocess", True),
+                cache_dir=config.get("cache_dir", "data/esw_cache"),
+                api_key=config.get("api_key", None),
+                mace_model=config.get("mace_model", None),
+                device=config.get("device", "auto"),
+                default_dtype=config.get("default_dtype", "float64"),
+                fmax=config.get("fmax", 0.05),
+                max_steps=config.get("max_steps", 500),
+                mu_min=config.get("mu_min", -5.0),
+                mu_max=config.get("mu_max", 0.0),
+                mu_step=config.get("mu_step", 0.01),
+                gpd_stability_tol=config.get("gpd_stability_tol", 1e-4),
+                refresh_relax=config.get("refresh_relax", False),
+                refresh_mp=config.get("refresh_mp", False),
+                target_min=config.get("target_min", None),
+                target_max=config.get("target_max", None),
+                n_jobs=config.get("n_jobs", 1),
+                timeout=config.get("timeout", None),
+            )
+
         elif benchmark_type == "property":
             benchmark = PropertyBenchmark(
                 include_band_gap=config.get("include_band_gap", True),
                 include_migration_barrier=config.get(
                     "include_migration_barrier", True
                 ),
+                include_esw=config.get("include_esw", False),
                 band_gap_backend=config.get("band_gap_backend", "hamgnn"),
                 band_gap_backend_kwargs=config.get("band_gap_backend_kwargs", {}),
                 band_gap_preprocess=config.get("band_gap_preprocess", True),
@@ -550,6 +616,23 @@ def main(input: str, config_name: str, output: str):
                 mobile_ion=config.get("mobile_ion", "Li1+"),
                 dimensionality=config.get("dimensionality", "3d"),
                 fast_threshold=config.get("fast_threshold", 0.6),
+                esw_preprocess=config.get("esw_preprocess", True),
+                esw_cache_dir=config.get("esw_cache_dir", "data/esw_cache"),
+                esw_api_key=config.get("esw_api_key", None),
+                esw_mace_model=config.get("esw_mace_model", None),
+                esw_device=config.get("esw_device", "auto"),
+                esw_default_dtype=config.get("esw_default_dtype", "float64"),
+                esw_fmax=config.get("esw_fmax", 0.05),
+                esw_max_steps=config.get("esw_max_steps", 500),
+                esw_mu_min=config.get("esw_mu_min", -5.0),
+                esw_mu_max=config.get("esw_mu_max", 0.0),
+                esw_mu_step=config.get("esw_mu_step", 0.01),
+                esw_gpd_stability_tol=config.get("esw_gpd_stability_tol", 1e-4),
+                esw_refresh_relax=config.get("esw_refresh_relax", False),
+                esw_refresh_mp=config.get("esw_refresh_mp", False),
+                esw_target_min=config.get("esw_target_min", None),
+                esw_target_max=config.get("esw_target_max", None),
+                esw_timeout=config.get("esw_timeout", None),
                 n_jobs=config.get("n_jobs", 1),
             )
 

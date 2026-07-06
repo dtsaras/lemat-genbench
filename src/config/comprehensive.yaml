@@ -14,6 +14,112 @@ validity_settings:
   max_mass_density: 25.0
   check_format: true
   check_symmetry: true
+  forbidden_elements:
+    - He
+    - Ne
+    - Ar
+    - Kr
+    - Xe
+    - Rn
+    - Og
+    - Tc
+    - Pm
+    - Po
+    - At
+    - Fr
+    - Ra
+    - Ac
+    - Th
+    - Pa
+    - U
+    - Np
+    - Pu
+    - Am
+    - Cm
+    - Bk
+    - Cf
+    - Es
+    - Fm
+    - Md
+    - No
+    - Lr
+    - Hg
+
+# Optional property gating. Active only when selected property families need it;
+# regular validity-only/default comprehensive runs are unchanged.
+property_gating:
+  enabled: true
+  required_families: ["migration_barrier", "band_gap", "property"]
+  failure_policy: filter
+  mobile_ion: Li1+
+  require_mobile_ion: true
+  min_num_elements: 2
+  check_bvlain_parameters: true
+  oxidation_charge_tolerance: 0.001
+  check_hamgnn_elements: true
+  hamgnn_dft_data: null
+
+migration_barrier_settings:
+  mobile_ion: Li1+
+  dimensionality: 3d
+  r_cut: 10.0
+  resolution: 0.2
+  k: 100
+  encut: 5.0
+  fast_threshold: 0.6
+  n_jobs: 1
+  timeout: 30
+
+esw_settings:
+  preprocess: true
+  cache_dir: data/esw_cache
+  api_key: null
+  mace_model: null
+  device: auto
+  default_dtype: float64
+  fmax: 0.05
+  max_steps: 500
+  mu_min: -5.0
+  mu_max: 0.0
+  mu_step: 0.01
+  gpd_stability_tol: 0.0001
+  refresh_relax: false
+  refresh_mp: false
+  target_min: null
+  target_max: null
+  n_jobs: 1
+  timeout: null
+
+property_settings:
+  include_band_gap: true
+  include_migration_barrier: true
+  include_esw: true
+  band_gap_backend: hamgnn
+  band_gap_backend_kwargs: {}
+  band_gap_preprocess: true
+  mobile_ion: Li1+
+  dimensionality: min
+  fast_threshold: 0.6
+  target_min: null
+  target_max: null
+  esw_preprocess: true
+  esw_cache_dir: data/esw_cache
+  esw_api_key: null
+  esw_mace_model: null
+  esw_device: auto
+  esw_default_dtype: float64
+  esw_fmax: 0.05
+  esw_max_steps: 500
+  esw_mu_min: -5.0
+  esw_mu_max: 0.0
+  esw_mu_step: 0.01
+  esw_gpd_stability_tol: 0.0001
+  esw_refresh_relax: false
+  esw_refresh_mp: false
+  esw_target_min: null
+  esw_target_max: null
+  esw_timeout: null
+  n_jobs: 1
 
 # Distribution benchmark settings
 mlips: ["orb", "mace", "uma"]
@@ -56,8 +162,11 @@ metadata:
   use_case: "Full evaluation across validity, distribution, novelty, uniqueness, and stability metrics"
   notes:
     - "Validity benchmark and preprocessor are ALWAYS run automatically"
+    - "Validity includes forbidden-element filtering for noble gases, selected radioactive elements, and Hg"
     - "Runs all benchmark families by default for comprehensive evaluation"
     - "Use --families argument to specify only specific families (excluding validity)"
-    - "Available families: distribution, diversity, novelty, uniqueness, hhi, sun, stability"
+    - "Available families: distribution, diversity, novelty, uniqueness, hhi, sun, stability, migration_barrier, band_gap, esw, property"
     - "Automatically runs appropriate preprocessors based on selected families"
+    - "When requested property families need it, property_gating checks BVlain and/or HamGNN/OpenMX readiness and filters out structures that cannot support the requested property calculations before subsequent benchmarks"
+    - "ESW is Li-exchange-only and uses MACE relaxation plus Materials Project entries cached under data/esw_cache by default"
     - "Updated validity settings to match new implementation structure"

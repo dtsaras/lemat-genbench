@@ -27,12 +27,26 @@ from lemat_genbench.preprocess.base import (
     PreprocessorConfig,
     PreprocessorResult,
 )
+from lemat_genbench.utils.oxidation_state import (
+    MIGRATION_BARRIER_READY_KEY,
+    OXIDATION_STATE_RECORD_KEY,
+    assign_oxidation_states_for_bvlain,
+)
 from lemat_genbench.utils.logging import logger
 
 # Suppress common warnings
 warnings.filterwarnings("ignore", message="No oxidation states specified on sites!")
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=DeprecationWarning)
+
+
+DEFAULT_FORBIDDEN_ELEMENTS = (
+    "He", "Ne", "Ar", "Kr", "Xe", "Rn", "Og",
+    "Tc", "Pm", "Po", "At", "Fr", "Ra",
+    "Ac", "Th", "Pa", "U", "Np", "Pu", "Am", "Cm", "Bk",
+    "Cf", "Es", "Fm", "Md", "No", "Lr",
+    "Hg",
+)
 
 
 @dataclass
@@ -74,6 +88,14 @@ class ValidityPreprocessorConfig(PreprocessorConfig):
     plausibility_max_mass_density: float = 25.0
     plausibility_check_format: bool = True
     plausibility_check_symmetry: bool = True
+    forbidden_elements: tuple[str, ...] = DEFAULT_FORBIDDEN_ELEMENTS
+    assign_oxidation_states: bool = False
+    mobile_ion: str = "Li1+"
+    require_mobile_ion: bool = False
+    migration_min_num_elements: int | None = None
+    check_bvlain_parameters: bool | str = False
+    oxidation_charge_tolerance: float = 1e-3
+    bvlain_settings: Dict[str, Any] | None = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert the preprocessor configuration to a dictionary for serialization.
@@ -94,6 +116,14 @@ class ValidityPreprocessorConfig(PreprocessorConfig):
             "plausibility_max_mass_density": self.plausibility_max_mass_density,
             "plausibility_check_format": self.plausibility_check_format,
             "plausibility_check_symmetry": self.plausibility_check_symmetry,
+            "forbidden_elements": list(self.forbidden_elements),
+            "assign_oxidation_states": self.assign_oxidation_states,
+            "mobile_ion": self.mobile_ion,
+            "require_mobile_ion": self.require_mobile_ion,
+            "migration_min_num_elements": self.migration_min_num_elements,
+            "check_bvlain_parameters": self.check_bvlain_parameters,
+            "oxidation_charge_tolerance": self.oxidation_charge_tolerance,
+            "bvlain_settings": self.bvlain_settings,
         })
         return base_dict
 
@@ -173,6 +203,14 @@ class ValidityPreprocessor(BasePreprocessor):
         plausibility_max_mass_density: float = 25.0,
         plausibility_check_format: bool = True,
         plausibility_check_symmetry: bool = True,
+        forbidden_elements: list[str] | tuple[str, ...] | None = None,
+        assign_oxidation_states: bool = False,
+        mobile_ion: str = "Li1+",
+        require_mobile_ion: bool = False,
+        migration_min_num_elements: int | None = None,
+        check_bvlain_parameters: bool | str = False,
+        oxidation_charge_tolerance: float = 1e-3,
+        bvlain_settings: Dict[str, Any] | None = None,
         name: str = None,
         description: str = None,
         n_jobs: int = 1,
@@ -196,6 +234,18 @@ class ValidityPreprocessor(BasePreprocessor):
             plausibility_max_mass_density=plausibility_max_mass_density,
             plausibility_check_format=plausibility_check_format,
             plausibility_check_symmetry=plausibility_check_symmetry,
+            forbidden_elements=tuple(
+                DEFAULT_FORBIDDEN_ELEMENTS
+                if forbidden_elements is None
+                else forbidden_elements
+            ),
+            assign_oxidation_states=assign_oxidation_states,
+            mobile_ion=mobile_ion,
+            require_mobile_ion=require_mobile_ion,
+            migration_min_num_elements=migration_min_num_elements,
+            check_bvlain_parameters=check_bvlain_parameters,
+            oxidation_charge_tolerance=oxidation_charge_tolerance,
+            bvlain_settings=bvlain_settings,
         )
         
         # Initialize validity metrics for configuration - these will be used to get compute attributes
@@ -228,6 +278,14 @@ class ValidityPreprocessor(BasePreprocessor):
             "distance_compute_args": self.distance_metric._get_compute_attributes(),
             "plausibility_compute_args": self.plausibility_metric._get_compute_attributes(),
             "charge_tolerance": self.config.charge_tolerance,
+            "forbidden_elements": self.config.forbidden_elements,
+            "assign_oxidation_states": self.config.assign_oxidation_states,
+            "mobile_ion": self.config.mobile_ion,
+            "require_mobile_ion": self.config.require_mobile_ion,
+            "migration_min_num_elements": self.config.migration_min_num_elements,
+            "check_bvlain_parameters": self.config.check_bvlain_parameters,
+            "oxidation_charge_tolerance": self.config.oxidation_charge_tolerance,
+            "bvlain_settings": self.config.bvlain_settings,
         }
 
     def run(self, structures: list[Structure], structure_sources: list[str] = None) -> PreprocessorResult:
@@ -322,6 +380,14 @@ class ValidityPreprocessor(BasePreprocessor):
         distance_compute_args: Dict[str, Any],
         plausibility_compute_args: Dict[str, Any],
         charge_tolerance: float,
+        forbidden_elements: tuple[str, ...] = DEFAULT_FORBIDDEN_ELEMENTS,
+        assign_oxidation_states: bool = False,
+        mobile_ion: str = "Li1+",
+        require_mobile_ion: bool = False,
+        migration_min_num_elements: int | None = None,
+        check_bvlain_parameters: bool | str = False,
+        oxidation_charge_tolerance: float = 1e-3,
+        bvlain_settings: Dict[str, Any] | None = None,
         structure_index: int = None,
         original_source: str = None,
         **kwargs: Any,
@@ -378,9 +444,20 @@ class ValidityPreprocessor(BasePreprocessor):
             # Distance and plausibility metrics return exactly 1.0 for valid, 0.0 for invalid
             distance_valid = distance_score == 1.0
             plausibility_valid = plausibility_score == 1.0
+            elements = sorted(
+                str(getattr(el, "symbol", el))
+                for el in structure.composition.elements
+            )
+            forbidden_present = sorted(set(elements) & set(forbidden_elements or ()))
+            element_valid = not forbidden_present
             
             # Overall validity requires ALL checks to pass
-            overall_valid = charge_valid and distance_valid and plausibility_valid
+            overall_valid = (
+                charge_valid
+                and distance_valid
+                and plausibility_valid
+                and element_valid
+            )
             
             # Add comprehensive validity metadata
             processed_structure.properties.update({
@@ -393,11 +470,18 @@ class ValidityPreprocessor(BasePreprocessor):
                 "charge_valid": charge_valid,
                 "distance_valid": distance_valid,
                 "plausibility_valid": plausibility_valid,
+                "element_valid": element_valid,
                 
                 # Detailed scores and deviations
                 "charge_deviation": charge_deviation,
                 "distance_score": distance_score,
                 "plausibility_score": plausibility_score,
+                "element_check_details": {
+                    "valid": element_valid,
+                    "elements": elements,
+                    "forbidden_elements_present": forbidden_present,
+                    "forbidden_elements": list(forbidden_elements or ()),
+                },
                 
                 # Summary for easy access
                 "validity_details": {
@@ -414,10 +498,20 @@ class ValidityPreprocessor(BasePreprocessor):
                         "valid": plausibility_valid,
                         "score": plausibility_score,
                     },
+                    "element_filter": {
+                        "valid": element_valid,
+                        "elements": elements,
+                        "forbidden_elements_present": forbidden_present,
+                    },
                     "overall": {
                         "valid": overall_valid,
-                        "checks_passed": sum([charge_valid, distance_valid, plausibility_valid]),
-                        "total_checks": 3,
+                        "checks_passed": sum([
+                            charge_valid,
+                            distance_valid,
+                            plausibility_valid,
+                            element_valid,
+                        ]),
+                        "total_checks": 4,
                     },
                 },
                 
@@ -425,11 +519,58 @@ class ValidityPreprocessor(BasePreprocessor):
                 "validity_preprocessor_version": "1.1.0",  # Updated version
                 "validity_timestamp": str(int(time.time())),
             })
+
+            if assign_oxidation_states and overall_valid:
+                try:
+                    oxidation_record = assign_oxidation_states_for_bvlain(
+                        processed_structure,
+                        mobile_ion=mobile_ion,
+                        charge_tolerance=oxidation_charge_tolerance,
+                        require_mobile_ion=require_mobile_ion,
+                        min_num_elements=migration_min_num_elements,
+                        check_bvlain_parameters=check_bvlain_parameters,
+                        bvlain_settings=bvlain_settings,
+                    )
+                except Exception as e:
+                    oxidation_record = {
+                        "status": "failed",
+                        "selected_source": None,
+                        "confidence_label": "failed",
+                        "mobile_ion": mobile_ion,
+                        "migration_barrier_ready": False,
+                        "failure_reasons": [str(e)],
+                        "warnings": [],
+                    }
+                processed_structure.properties[OXIDATION_STATE_RECORD_KEY] = (
+                    oxidation_record
+                )
+                processed_structure.properties[MIGRATION_BARRIER_READY_KEY] = (
+                    oxidation_record.get("migration_barrier_ready", False)
+                )
+                processed_structure.properties["oxidation_state_status"] = (
+                    oxidation_record.get("status")
+                )
+                processed_structure.properties["oxidation_state_confidence"] = (
+                    oxidation_record.get("confidence_label")
+                )
+                processed_structure.properties["validity_details"][
+                    "migration_barrier_readiness"
+                ] = {
+                    "ready": oxidation_record.get("migration_barrier_ready", False),
+                    "oxidation_state_status": oxidation_record.get("status"),
+                    "confidence": oxidation_record.get("confidence_label"),
+                    "bvlain_parameters_complete": oxidation_record.get(
+                        "bvlain_parameters_complete"
+                    ),
+                }
+            elif assign_oxidation_states:
+                processed_structure.properties[MIGRATION_BARRIER_READY_KEY] = False
             
             logger.debug(
                 f"Validity check for {structure.formula} (ID: {structure_index}, Source: {original_source}): "
                 f"overall={overall_valid}, charge={charge_valid}, "
-                f"distance={distance_valid}, plausibility={plausibility_valid}"
+                f"distance={distance_valid}, plausibility={plausibility_valid}, "
+                f"element={element_valid}"
             )
             
             return processed_structure
@@ -478,18 +619,31 @@ class ValidityPreprocessor(BasePreprocessor):
         charge_deviations = []
         distance_scores = []
         plausibility_scores = []
+        element_validities = []
         overall_validities = []
+        oxidation_records = []
+        migration_barrier_readiness = []
         
         for structure in processed_structures:
             charge_deviations.append(structure.properties.get("charge_deviation", 0.0))
             distance_scores.append(structure.properties.get("distance_score", 0.0))
             plausibility_scores.append(structure.properties.get("plausibility_score", 0.0))
+            element_validities.append(1.0 if structure.properties.get("element_valid", True) else 0.0)
             overall_validities.append(1.0 if structure.properties.get("overall_valid", False) else 0.0)
+            record = structure.properties.get(OXIDATION_STATE_RECORD_KEY)
+            if record is not None:
+                oxidation_records.append(record)
+                migration_barrier_readiness.append(
+                    1.0
+                    if structure.properties.get(MIGRATION_BARRIER_READY_KEY, False)
+                    else 0.0
+                )
         
         # Convert to numpy arrays for easier computation
         charge_deviations = np.array(charge_deviations)
         distance_scores = np.array(distance_scores)
         plausibility_scores = np.array(plausibility_scores)
+        element_validities = np.array(element_validities)
         overall_validities = np.array(overall_validities)
         
         # Compute aggregated statistics
@@ -503,9 +657,16 @@ class ValidityPreprocessor(BasePreprocessor):
         
         plausibility_valid_count = np.sum(plausibility_scores == 1.0)
         plausibility_valid_ratio = plausibility_valid_count / n_structures
+
+        element_valid_count = np.sum(element_validities == 1.0)
+        element_valid_ratio = element_valid_count / n_structures
         
         overall_valid_count = np.sum(overall_validities == 1.0)
         overall_valid_ratio = overall_valid_count / n_structures
+        oxidation_success_count = sum(
+            record.get("status") == "success" for record in oxidation_records
+        )
+        migration_barrier_ready_count = int(np.sum(migration_barrier_readiness))
         
         # Create MetricResult objects for each evaluator
         charge_metric_result = MetricResult(
@@ -610,12 +771,21 @@ class ValidityPreprocessor(BasePreprocessor):
             'interatomic_distance_count': int(distance_valid_count),
             'physical_plausibility_ratio': plausibility_valid_ratio,
             'physical_plausibility_count': int(plausibility_valid_count),
+            'element_validity_ratio': element_valid_ratio,
+            'element_validity_count': int(element_valid_count),
             'overall_validity_ratio': overall_valid_ratio,
             'overall_validity_count': int(overall_valid_count),
             'total_structures': n_structures,
             'any_invalid_count': int(n_structures - overall_valid_count),
             'any_invalid_ratio': (n_structures - overall_valid_count) / n_structures if n_structures > 0 else 0.0
         }
+        if oxidation_records:
+            final_scores.update({
+                'oxidation_state_success_count': int(oxidation_success_count),
+                'oxidation_state_success_ratio': oxidation_success_count / len(oxidation_records),
+                'migration_barrier_ready_count': migration_barrier_ready_count,
+                'migration_barrier_ready_ratio': migration_barrier_ready_count / len(oxidation_records),
+            })
         
         # Create metadata
         metadata = {
